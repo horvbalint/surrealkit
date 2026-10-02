@@ -327,33 +327,20 @@ mod tests {
 		// is now a hard error rather than a silent fallback.
 		let tmp = tempfile::TempDir::new().expect("tmpdir");
 		let folder = tmp.path().to_string_lossy().to_string();
-		let db = surrealdb::engine::any::connect((
-			"mem://",
-			surrealdb::opt::Config::new()
-				.capabilities(surrealdb::opt::capabilities::Capabilities::all()),
-		))
-		.await
-		.expect("mem db");
-		db.use_ns("t").use_db("t").await.expect("use");
+		let db = crate::test_db::fresh("seed_missing").await;
 
 		let err = Seed::from_dir(&folder).run(&db).await.unwrap_err().to_string();
 		assert!(err.contains("no seed directory"), "got: {err}");
 		assert!(err.contains("mkdir"), "error should say how to fix it: {err}");
 	}
 
-	use surrealdb::engine::any::connect;
-	use surrealdb::opt::Config;
-	use surrealdb::opt::capabilities::Capabilities;
 	use tempfile::TempDir;
 
 	use super::*;
 	use crate::variables::TemplateVars;
 
 	async fn mem_db() -> Surreal<Any> {
-		let config = Config::new().capabilities(Capabilities::all());
-		let db = connect(("mem://", config)).await.expect("connect mem://");
-		db.use_ns("test").use_db("seed_test").await.expect("use_ns/use_db");
-		db
+		crate::test_db::fresh("seed_test").await
 	}
 
 	#[tokio::test]

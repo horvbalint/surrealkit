@@ -13,7 +13,7 @@ use surrealkit::config::{DbCfg, DbOverrides, connect};
 use surrealkit::core::exec_surql;
 use surrealkit::module::Module;
 use surrealkit::project::{ProjectConfig, Target};
-use surrealkit::rollout::{self, RolloutExecutionOpts, RolloutPlanOpts};
+use surrealkit::rollout::{self, RolloutExecutionOpts, RolloutPlanOpts, RolloutUpOpts};
 use surrealkit::setup::force_setup;
 use surrealkit::sync::{self, SyncOpts};
 use surrealkit::tester::{TestOpts, run_test};
@@ -190,6 +190,11 @@ enum Commands {
 		timeout_ms: Option<u64>,
 		#[arg(long)]
 		keep_db: bool,
+		/// How each suite's database gets its schema: `sync` from the schema
+		/// folder (the default), `rollouts` replayed in order from empty, or
+		/// `both`, running every suite once on each.
+		#[arg(long, value_enum, value_name = "SOURCE")]
+		schema_from: Option<surrealkit::tester::SchemaSource>,
 	},
 	/// Introspect the database and generate a typed schema document (JSON).
 	Typegen {
@@ -202,6 +207,11 @@ enum Commands {
 		/// Emit compact (single-line) JSON instead of pretty-printed.
 		#[arg(long)]
 		compact: bool,
+		/// Also write TypeScript types, overriding `[typegen] typescript`: a
+		/// `.ts` file, or a directory to write `index.ts` (or `[typegen]
+		/// filename`) in.
+		#[arg(long, value_name = "PATH")]
+		typescript: Option<PathBuf>,
 	},
 }
 
@@ -243,9 +253,43 @@ enum RolloutCommands {
 		#[arg(value_name = "ROLLOUT_ID")]
 		rollout: Option<String>,
 	},
+	/// Check manifests without connecting. With an id, that manifest; without
+	/// one, every manifest and how they chain, which suits a CI check.
 	Lint {
 		#[arg(value_name = "ROLLOUT_ID")]
+		rollout: Option<String>,
+	},
+	/// Run every rollout this database has not run yet, in order. Each one is
+	/// started and completed, except the newest, which is left ready to complete
+	/// so the application can cut over first.
+	Up {
+		/// Complete the newest rollout too.
+		#[arg(long)]
+		complete: bool,
+		/// The first rollout this database still needs, when its position cannot
+		/// be worked out from its history.
+		#[arg(long, value_name = "ROLLOUT_ID")]
+		from: Option<String>,
+		/// Report what would run, and run nothing.
+		#[arg(long)]
+		dry_run: bool,
+	},
+	/// Give a manifest planned before 1.0.0-beta.6 its own copy of the SQL it
+	/// applies. Run it where the schema folder matches what it was planned from.
+	Freeze {
+		#[arg(value_name = "ROLLOUT_ID")]
 		rollout: String,
+	},
+	/// Drop the newest rollout from the project, as if it had never been
+	/// planned: delete its manifest and directory, and put the snapshots back to
+	/// where they were before it. Only for a rollout no database has completed.
+	Discard {
+		#[arg(value_name = "ROLLOUT_ID")]
+		rollout: String,
+		/// Leave the snapshots as they are, for when they have been put right by
+		/// hand.
+		#[arg(long)]
+		keep_snapshots: bool,
 	},
 	/// Heal a rollout stuck in an intermediate state without re-running SQL
 	/// steps. Useful when `complete` was killed mid-flight (issue #55) and
@@ -590,6 +634,7 @@ async fn main() -> Result<()> {
 			allow_all_statements,
 		} => {
 			let typegen_cfg = surrealkit::variables::load_typegen_config(None)?;
+			let typegen_ts_out = typegen_cfg.typescript_path()?;
 			if selection.pairs() == 0 {
 				bail!(
 					"refusing filesystem sync: the selected targets accept none of the selected \
@@ -656,7 +701,7 @@ async fn main() -> Result<()> {
 						vars: template_vars.clone(),
 						folder: folder.clone(),
 						module: module.clone(),
-						typegen_ts_out: typegen_cfg.typescript.clone(),
+						typegen_ts_out: typegen_ts_out.clone(),
 						typegen_ts_format: typegen_cfg.format.clone(),
 					};
 					let outcome =
@@ -779,7 +824,41 @@ async fn main() -> Result<()> {
 				rollout,
 			} => {
 				warn_unused_target_selection("rollout lint", target_selection_used);
-				rollout::run_lint(&folder, RolloutExecutionOpts::new(Some(rollout))).await?;
+				rollout::run_lint(&folder, RolloutExecutionOpts::new(rollout)).await?;
+			}
+			RolloutCommands::Up {
+				complete,
+				from,
+				dry_run,
+			} => {
+				let target = selection.single_target()?;
+				let db = connect(target.cfg()).await?;
+				rollout::run_up(
+					&db,
+					&folder,
+					RolloutUpOpts {
+						complete_newest: complete,
+						from,
+						dry_run,
+						query_timeout: target.cfg().query_timeout,
+						quiet: false,
+					},
+					&template_vars,
+				)
+				.await?;
+			}
+			RolloutCommands::Discard {
+				rollout,
+				keep_snapshots,
+			} => {
+				warn_unused_target_selection("rollout discard", target_selection_used);
+				rollout::run_discard(&folder, &rollout, keep_snapshots)?;
+			}
+			RolloutCommands::Freeze {
+				rollout,
+			} => {
+				warn_unused_target_selection("rollout freeze", target_selection_used);
+				rollout::run_freeze(&folder, &rollout)?;
 			}
 			RolloutCommands::Repair {
 				rollout,
@@ -832,6 +911,7 @@ async fn main() -> Result<()> {
 			base_url,
 			timeout_ms,
 			keep_db,
+			schema_from,
 		} => {
 			run_test(
 				env.as_ref(),
@@ -848,6 +928,7 @@ async fn main() -> Result<()> {
 					base_url,
 					timeout_ms,
 					keep_db,
+					schema_from,
 				},
 				template_vars,
 				&overrides,
@@ -858,9 +939,19 @@ async fn main() -> Result<()> {
 			out,
 			stdout,
 			compact,
+			typescript,
 		} => {
+			let mut typegen_cfg = surrealkit::variables::load_typegen_config(None)?;
+			if let Some(typescript) = typescript {
+				// A file on the command line wins outright; a directory still takes
+				// the configured file name.
+				if surrealkit::variables::is_typescript_file(&typescript) {
+					typegen_cfg.filename = None;
+				}
+				typegen_cfg.typescript = Some(typescript);
+			}
+			let ts_out = typegen_cfg.typescript_path()?;
 			let db = connect(&cfg).await?;
-			let typegen_cfg = surrealkit::variables::load_typegen_config(None)?;
 			run_typegen(
 				&db,
 				&folder,
@@ -870,7 +961,7 @@ async fn main() -> Result<()> {
 					out,
 					stdout,
 					pretty: !compact,
-					ts_out: typegen_cfg.typescript,
+					ts_out,
 					ts_format: typegen_cfg.format,
 				},
 			)
