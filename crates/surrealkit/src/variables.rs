@@ -155,21 +155,27 @@ pub struct TypegenConfig {
 	/// The generated file path is appended as the final argument. Failures are
 	/// non-fatal warnings.
 	pub format: Option<String>,
-	/// The file the JSON schema document goes to. When set, `sync` writes it
-	/// after applying schema changes, and `surrealkit typegen` writes it there
-	/// instead of `{folder}/types/schema.json` (`--out` still wins).
+	/// Where the JSON schema document goes. When set, `sync` writes it after
+	/// applying schema changes, and `surrealkit typegen` writes it there instead
+	/// of `{folder}/types/schema.json` (`--out` still wins). A path ending in
+	/// `.json` is the file itself; anything else is a directory, and the file in
+	/// it is `schema.json`.
 	pub json: Option<PathBuf>,
 }
 
 impl TypegenConfig {
 	/// The JSON schema file to write, if JSON output is configured.
 	pub fn json_path(&self) -> Result<Option<PathBuf>> {
-		match &self.json {
-			Some(json) if json.as_os_str().is_empty() => {
-				bail!("[typegen] json must name a file, not be empty")
-			}
-			json => Ok(json.clone()),
+		let Some(json) = &self.json else {
+			return Ok(None);
+		};
+		if json.as_os_str().is_empty() {
+			bail!("[typegen] json must name a file or directory, not be empty");
 		}
+		if is_json_file(json) {
+			return Ok(Some(json.clone()));
+		}
+		Ok(Some(json.join(DEFAULT_JSON_FILE)))
 	}
 
 	/// The TypeScript file to write, if TS generation is configured.
@@ -203,6 +209,14 @@ impl TypegenConfig {
 
 /// The TypeScript file written when the configured path is a directory.
 pub const DEFAULT_TYPESCRIPT_FILE: &str = "index.ts";
+
+/// The JSON schema file written when the configured path is a directory.
+pub const DEFAULT_JSON_FILE: &str = "schema.json";
+
+/// Whether `path` names a JSON file rather than a directory.
+pub fn is_json_file(path: &Path) -> bool {
+	path.extension().is_some_and(|ext| ext == "json")
+}
 
 /// Whether `path` names a TypeScript file rather than a directory.
 pub fn is_typescript_file(path: &Path) -> bool {
@@ -557,6 +571,18 @@ mod tests {
 			Some(Path::new("src/types/schema.json"))
 		);
 		assert!(parsed.typescript_path().unwrap().is_none());
+	}
+
+	#[test_case::test_case(Some("libs/db/types"), Some("libs/db/types/schema.json") ; "directory gets schema json")]
+	#[test_case::test_case(Some("libs/db/types/database.json"), Some("libs/db/types/database.json") ; "json file")]
+	#[test_case::test_case(Some("libs/db/types.d"), Some("libs/db/types.d/schema.json") ; "dotted directory")]
+	#[test_case::test_case(None, None ; "not configured")]
+	fn json_path_resolves(json: Option<&str>, expected: Option<&str>) {
+		let cfg = TypegenConfig {
+			json: json.map(PathBuf::from),
+			..TypegenConfig::default()
+		};
+		assert_eq!(cfg.json_path().unwrap(), expected.map(PathBuf::from));
 	}
 
 	#[test]

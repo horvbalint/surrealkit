@@ -30,3 +30,8 @@ rm out/schema.json
 kit typegen >/dev/null
 [ -f out/schema.json ] || fail "typegen ignored [typegen] json"
 ok "typegen writes to [typegen] json"
+
+printf '%s\n' '[typegen]' 'json = "gen"' > surrealkit.toml
+kit sync
+[ -f gen/schema.json ] || fail "sync did not write gen/schema.json for a directory"
+ok "sync writes schema.json into a [typegen] json directory"
