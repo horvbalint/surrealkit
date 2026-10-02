@@ -155,9 +155,23 @@ pub struct TypegenConfig {
 	/// The generated file path is appended as the final argument. Failures are
 	/// non-fatal warnings.
 	pub format: Option<String>,
+	/// The file the JSON schema document goes to. When set, `sync` writes it
+	/// after applying schema changes, and `surrealkit typegen` writes it there
+	/// instead of `{folder}/types/schema.json` (`--out` still wins).
+	pub json: Option<PathBuf>,
 }
 
 impl TypegenConfig {
+	/// The JSON schema file to write, if JSON output is configured.
+	pub fn json_path(&self) -> Result<Option<PathBuf>> {
+		match &self.json {
+			Some(json) if json.as_os_str().is_empty() => {
+				bail!("[typegen] json must name a file, not be empty")
+			}
+			json => Ok(json.clone()),
+		}
+	}
+
 	/// The TypeScript file to write, if TS generation is configured.
 	pub fn typescript_path(&self) -> Result<Option<PathBuf>> {
 		let Some(typescript) = &self.typescript else {
@@ -485,6 +499,7 @@ mod tests {
 			typescript: typescript.map(PathBuf::from),
 			filename: filename.map(str::to_string),
 			format: None,
+			json: None,
 		}
 	}
 
@@ -529,6 +544,29 @@ mod tests {
 			parsed.typescript_path().unwrap(),
 			Some(PathBuf::from("types/schema.generated.ts"))
 		);
+	}
+
+	#[test]
+	fn load_typegen_config_reads_json_path() {
+		let tmp = TempDir::new().unwrap();
+		let cfg = tmp.path().join("surrealkit.toml");
+		std::fs::write(&cfg, "[typegen]\njson = \"src/types/schema.json\"\n").unwrap();
+		let parsed = load_typegen_config(Some(&cfg)).unwrap();
+		assert_eq!(
+			parsed.json_path().unwrap().as_deref(),
+			Some(Path::new("src/types/schema.json"))
+		);
+		assert!(parsed.typescript_path().unwrap().is_none());
+	}
+
+	#[test]
+	fn json_path_rejects_an_empty_path() {
+		let cfg = TypegenConfig {
+			json: Some(PathBuf::new()),
+			..TypegenConfig::default()
+		};
+		let err = cfg.json_path().unwrap_err().to_string();
+		assert!(err.contains("[typegen] json"), "{err}");
 	}
 
 	#[test]

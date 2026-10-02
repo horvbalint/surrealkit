@@ -359,10 +359,14 @@ surrealkit typegen --stdout        # print instead
 surrealkit typegen --out types.json
 ```
 
-Configure TypeScript output in `surrealkit.toml`:
+Configure the outputs in `surrealkit.toml`:
 
 ```toml
 [typegen]
+# Where the JSON schema document goes. Setting this makes `surrealkit sync`
+# write it too, and `surrealkit typegen` writes here unless given --out.
+json = "src/types/schema.json"
+
 # Where generated TypeScript goes. Setting this enables TS generation:
 # `surrealkit typegen` and `surrealkit sync` both write it.
 typescript = "src/types"
@@ -381,8 +385,9 @@ format = "biome check --write"
 which case `filename` is not used. `surrealkit typegen --typescript <path>`
 overrides the configured path for one run.
 
-With `typescript` set, `surrealkit sync` regenerates types after applying schema
-changes, so the generated types never drift from the database.
+With `typescript` or `json` set, `surrealkit sync` regenerates them after
+applying schema changes, so the generated types never drift from the database.
+Use `json` when you generate your own types from the schema document.
 
 ## Vite Plugin
 
